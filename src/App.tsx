@@ -19,12 +19,38 @@ import { InitialSetupWizard } from './components/InitialSetupWizard';
 import { ShieldAlert } from 'lucide-react';
 
 function JournalApp() {
-  const { currentUser, users, loginAs, logout, systemConfig } = useJournal();
+  const { currentUser, users, loginAs, logout, systemConfig, isLoading, syncError } = useJournal();
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [addGradeModalOpen, setAddGradeModalOpen] = useState(false);
 
-  // If system is not initialized on first visit, show the initial school & admin setup wizard
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-[#061121] via-[#0c2340] to-[#12365e] flex flex-col items-center justify-center text-slate-200 text-sm font-sans">
+        <div className="w-10 h-10 border-4 border-white/20 border-t-amber-300 rounded-full animate-spin mb-4" />
+        <span>Łączenie z dziennikiem szkoły…</span>
+      </div>
+    );
+  }
+
+  if (!systemConfig.isInitialized && syncError) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-[#061121] via-[#0c2340] to-[#12365e] flex items-center justify-center p-4 font-sans">
+        <div className="bg-white rounded-2xl p-6 max-w-sm text-center text-sm text-slate-700 shadow-xl">
+          <ShieldAlert className="w-8 h-8 text-rose-600 mx-auto mb-3" />
+          <p className="mb-4">{syncError}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-bold cursor-pointer"
+          >
+            Spróbuj ponownie
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // The setup wizard is shown only once for the whole school (stored on the server), never per device
   if (!systemConfig.isInitialized) {
     return <InitialSetupWizard />;
   }
@@ -41,6 +67,12 @@ function JournalApp() {
         setActiveTab={setActiveTab}
         onOpenLogin={() => setLoginModalOpen(true)}
       />
+
+      {syncError && (
+        <div className="bg-rose-50 border-b border-rose-200 text-rose-800 text-xs text-center py-2 px-4">
+          {syncError} Zmiany zostaną zapisane ponownie automatycznie.
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">

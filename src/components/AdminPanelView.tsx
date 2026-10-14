@@ -1597,12 +1597,12 @@ export const AdminPanelView: React.FC = () => {
               Przywracanie pierwotnych danych demonstracyjnych
             </h3>
             <p className="text-xs text-slate-600 leading-relaxed max-w-2xl">
-              Dziennik przechowuje wszystkie dane lokalnie w przeglądarce. W każdej chwili możesz zresetować stan ocen i frekwencji do pierwotnych danych demonstracyjnych.
+              Dziennik przechowuje wszystkie dane we wspólnej bazie danych szkoły — są dostępne z każdego urządzenia po zalogowaniu. Reset usuwa wszystkie dane i konta na wszystkich urządzeniach oraz ponownie uruchamia kreator konfiguracji.
             </p>
 
             <button
               onClick={() => {
-                if (window.confirm('Czy na pewno chcesz przywrócić pierwotną bazę danych demonstracyjnych?')) {
+                if (window.confirm('Czy na pewno chcesz usunąć wszystkie dane dziennika i uruchomić kreator od nowa? Tej operacji nie można cofnąć.')) {
                   resetToDefaults();
                 }
               }}

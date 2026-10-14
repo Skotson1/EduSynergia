@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import {
   User,
   UserRole,
@@ -52,6 +52,8 @@ interface AttendanceStats {
 }
 
 interface JournalContextType {
+  isLoading: boolean;
+  syncError: string;
   currentUser: User | null;
   users: User[];
   systemConfig: SystemConfig;
@@ -64,9 +66,9 @@ interface JournalContextType {
     adminEmail: string;
     adminPassword?: string;
     includeDemoData?: boolean;
-  }) => void;
+  }) => Promise<{ success: boolean; message?: string }>;
   updateSystemConfig: (updated: Partial<SystemConfig>) => void;
-  resetSystemToInitialWizard: () => void;
+  resetSystemToInitialWizard: () => Promise<void>;
   createUserByAdmin: (userData: {
     name: string;
     email: string;
@@ -81,9 +83,9 @@ interface JournalContextType {
   updateUserByAdmin: (id: string, updated: Partial<User>) => void;
   deleteUserByAdmin: (id: string) => void;
   loginAs: (userId: string) => void;
-  loginWithCredentials: (email: string, password?: string) => boolean;
+  loginWithCredentials: (email: string, password?: string) => Promise<boolean>;
   logout: () => void;
-  resetSystem: () => void;
+  resetSystem: () => Promise<void>;
 
   grades: Grade[];
   subjects: Subject[];
@@ -155,34 +157,66 @@ interface JournalContextType {
     roleCandidate?: 'uczen' | 'nauczyciel' | 'rodzic';
     className?: string;
     reasonNote?: string;
-  }) => { success: boolean; message: string; requestId: string };
+  }) => Promise<{ success: boolean; message: string; requestId: string }>;
+  checkPasswordResetRequestStatus: (query: string) => Promise<PasswordResetRequest | null>;
   resolvePasswordResetRequest: (
     requestId: string,
     params: { newPassword: string; adminResponse: string; approved: boolean }
   ) => void;
 
-  resetToDefaults: () => void;
+  resetToDefaults: () => Promise<void>;
 }
 
 const JournalContext = createContext<JournalContextType | undefined>(undefined);
 
 const STORAGE_PREFIX = 'edusynergia_v3_clean_';
 
-function loadStorage<T>(key: string, fallback: T): T {
-  try {
-    const item = localStorage.getItem(STORAGE_PREFIX + key);
-    return item ? JSON.parse(item) : fallback;
-  } catch {
-    return fallback;
+const TOKEN_KEY = STORAGE_PREFIX + 'sessionToken';
+
+// Collections synchronised with the shared school database (Netlify Database via /api)
+const ARRAY_KEYS = [
+  'users',
+  'grades',
+  'students',
+  'attendance',
+  'timetable',
+  'messages',
+  'announcements',
+  'homework',
+  'behaviorPoints',
+  'lessonPlusMinus',
+  'passwordResetRequests',
+] as const;
+type ArrayKey = (typeof ARRAY_KEYS)[number];
+type SyncedState = { systemConfig: SystemConfig } & Record<ArrayKey, Array<{ id: string }>>;
+type Change = { value: unknown } | { upserts: Array<{ id: string }>; deletes: string[] };
+
+async function api<T = any>(path: string, options: { method?: string; body?: unknown; token?: string | null } = {}): Promise<T> {
+  const res = await fetch('/api/' + path, {
+    method: options.method || (options.body ? 'POST' : 'GET'),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.token ? { Authorization: 'Bearer ' + options.token } : {}),
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || 'Błąd połączenia z serwerem.') as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
+  return data as T;
 }
 
-function saveStorage<T>(key: string, value: T): void {
-  try {
-    localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value));
-  } catch (err) {
-    console.error('Failed to save to localStorage:', err);
-  }
+function diffCollection(prev: Array<{ id: string }>, next: Array<{ id: string }>): Change | null {
+  if (prev === next) return null;
+  const prevById = new Map(prev.map(item => [item.id, JSON.stringify(item)]));
+  const nextIds = new Set(next.map(item => item.id));
+  const upserts = next.filter(item => prevById.get(item.id) !== JSON.stringify(item));
+  const deletes = prev.filter(item => !nextIds.has(item.id)).map(item => item.id);
+  if (upserts.length === 0 && deletes.length === 0) return null;
+  return { upserts, deletes };
 }
 
 const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
@@ -196,79 +230,226 @@ const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
 };
 
 export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [systemConfig, setSystemConfig] = useState<SystemConfig>(() =>
-    loadStorage('systemConfig', DEFAULT_SYSTEM_CONFIG)
-  );
-  const [users, setUsers] = useState<User[]>(() => loadStorage('users', []));
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const savedUserId = localStorage.getItem(STORAGE_PREFIX + 'currentUserId');
-    if (savedUserId) {
-      const savedUsers = loadStorage<User[]>('users', []);
-      const match = savedUsers.find(u => u.id === savedUserId);
-      if (match) return match;
-    }
-    return null;
-  });
+  const [systemConfig, setSystemConfig] = useState<SystemConfig>(DEFAULT_SYSTEM_CONFIG);
+  const [users, setUsers] = useState<User[]>([]);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [syncError, setSyncError] = useState('');
 
-  const [grades, setGrades] = useState<Grade[]>(() => loadStorage('grades', []));
+  const [grades, setGrades] = useState<Grade[]>([]);
   const [subjects] = useState<Subject[]>(INITIAL_SUBJECTS);
-  const [students, setStudents] = useState<Student[]>(() => loadStorage('students', []));
-  const [attendance, setAttendance] = useState<AttendanceRecord[]>(() => loadStorage('attendance', []));
-  const [timetable, setTimetable] = useState<TimetableLesson[]>(() => loadStorage('timetable', []));
-  const [messages, setMessages] = useState<Message[]>(() => loadStorage('messages', []));
-  const [announcements, setAnnouncements] = useState<Announcement[]>(() => loadStorage('announcements', []));
-  const [homework, setHomework] = useState<HomeworkTask[]>(() => loadStorage('homework', []));
-  const [behaviorPoints, setBehaviorPoints] = useState<BehaviorPoint[]>(() =>
-    loadStorage('behaviorPoints', [])
-  );
-  const [lessonPlusMinus, setLessonPlusMinus] = useState<LessonPlusMinus[]>(() =>
-    loadStorage('lessonPlusMinus', [])
-  );
-  const [passwordResetRequests, setPasswordResetRequests] = useState<PasswordResetRequest[]>(() =>
-    loadStorage('passwordResetRequests', [])
-  );
+  const [students, setStudents] = useState<Student[]>([]);
+  const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
+  const [timetable, setTimetable] = useState<TimetableLesson[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [homework, setHomework] = useState<HomeworkTask[]>([]);
+  const [behaviorPoints, setBehaviorPoints] = useState<BehaviorPoint[]>([]);
+  const [lessonPlusMinus, setLessonPlusMinus] = useState<LessonPlusMinus[]>([]);
+  const [passwordResetRequests, setPasswordResetRequests] = useState<PasswordResetRequest[]>([]);
 
-  useEffect(() => saveStorage('systemConfig', systemConfig), [systemConfig]);
-  useEffect(() => saveStorage('users', users), [users]);
-  useEffect(() => saveStorage('grades', grades), [grades]);
-  useEffect(() => saveStorage('students', students), [students]);
-  useEffect(() => saveStorage('attendance', attendance), [attendance]);
-  useEffect(() => saveStorage('timetable', timetable), [timetable]);
-  useEffect(() => saveStorage('messages', messages), [messages]);
-  useEffect(() => saveStorage('announcements', announcements), [announcements]);
-  useEffect(() => saveStorage('homework', homework), [homework]);
-  useEffect(() => saveStorage('behaviorPoints', behaviorPoints), [behaviorPoints]);
-  useEffect(() => saveStorage('lessonPlusMinus', lessonPlusMinus), [lessonPlusMinus]);
-  useEffect(() => saveStorage('passwordResetRequests', passwordResetRequests), [passwordResetRequests]);
+  // --- Server synchronisation -------------------------------------------------
+  const tokenRef = useRef<string | null>(localStorage.getItem(TOKEN_KEY));
+  // Last state known to be stored on the server – local changes are diffed against it
+  const syncedRef = useRef<SyncedState | null>(null);
+  const latestRef = useRef<SyncedState | null>(null);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushingRef = useRef(false);
+  const localVersionRef = useRef(0);
+  // The user who actually holds the server session (admins can preview other users' views)
+  const sessionUserIdRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem(STORAGE_PREFIX + 'currentUserId', currentUser.id);
-    } else {
-      localStorage.removeItem(STORAGE_PREFIX + 'currentUserId');
-    }
-  }, [currentUser]);
-
-  const resetSystemToInitialWizard = () => {
-    try {
-      localStorage.clear();
-    } catch {}
-    setSystemConfig({ ...DEFAULT_SYSTEM_CONFIG, isInitialized: false });
-    setCurrentUser(null);
-    setUsers([]);
-    setStudents([]);
-    setGrades([]);
-    setAttendance([]);
-    setTimetable([]);
-    setMessages([]);
-    setAnnouncements([]);
-    setHomework([]);
-    setBehaviorPoints([]);
-    setLessonPlusMinus([]);
-    setPasswordResetRequests([]);
+  latestRef.current = {
+    systemConfig,
+    users,
+    grades,
+    students,
+    attendance,
+    timetable,
+    messages,
+    announcements,
+    homework,
+    behaviorPoints,
+    lessonPlusMinus,
+    passwordResetRequests,
   };
 
-  const initializeSystem = (config: {
+  const setters: Record<ArrayKey, (value: any) => void> = {
+    users: setUsers,
+    grades: setGrades,
+    students: setStudents,
+    attendance: setAttendance,
+    timetable: setTimetable,
+    messages: setMessages,
+    announcements: setAnnouncements,
+    homework: setHomework,
+    behaviorPoints: setBehaviorPoints,
+    lessonPlusMinus: setLessonPlusMinus,
+    passwordResetRequests: setPasswordResetRequests,
+  };
+
+  const clearLocalState = () => {
+    syncedRef.current = null;
+    sessionUserIdRef.current = null;
+    setSystemConfig(DEFAULT_SYSTEM_CONFIG);
+    for (const key of ARRAY_KEYS) setters[key]([]);
+    setCurrentUser(null);
+  };
+
+  const applyServerState = (state: any, userId?: string) => {
+    const next: SyncedState = {
+      systemConfig: state.systemConfig || DEFAULT_SYSTEM_CONFIG,
+    } as SyncedState;
+    for (const key of ARRAY_KEYS) next[key] = Array.isArray(state[key]) ? state[key] : [];
+    syncedRef.current = next;
+    if (userId) sessionUserIdRef.current = userId;
+    setSystemConfig(next.systemConfig);
+    for (const key of ARRAY_KEYS) setters[key](next[key]);
+    const serverUsers = next.users as User[];
+    setCurrentUser(prev => {
+      const id = userId ?? prev?.id;
+      return serverUsers.find(u => u.id === id) ?? null;
+    });
+  };
+
+  const setSession = (token: string | null) => {
+    tokenRef.current = token;
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  };
+
+  const flushChanges = useCallback(async () => {
+    flushTimerRef.current = null;
+    const synced = syncedRef.current;
+    const latest = latestRef.current;
+    if (!synced || !latest || !tokenRef.current) return;
+    if (flushingRef.current) {
+      flushTimerRef.current = setTimeout(flushChanges, 300);
+      return;
+    }
+
+    const changes: Record<string, Change> = {};
+    if (JSON.stringify(synced.systemConfig) !== JSON.stringify(latest.systemConfig)) {
+      changes.systemConfig = { value: latest.systemConfig };
+    }
+    for (const key of ARRAY_KEYS) {
+      const change = diffCollection(synced[key], latest[key]);
+      if (change) changes[key] = change;
+    }
+    if (Object.keys(changes).length === 0) return;
+
+    flushingRef.current = true;
+    syncedRef.current = latest;
+    try {
+      await api('sync', { body: { changes }, token: tokenRef.current });
+      setSyncError('');
+    } catch (err: any) {
+      if (err.status === 401) {
+        setSession(null);
+        clearLocalState();
+      } else {
+        // Keep the unsynchronised changes and retry later
+        syncedRef.current = synced;
+        setSyncError(err.message || 'Nie udało się zapisać zmian na serwerze.');
+        flushTimerRef.current = setTimeout(flushChanges, 5000);
+      }
+    } finally {
+      flushingRef.current = false;
+    }
+  }, []);
+
+  // Push every local change to the shared database (debounced)
+  useEffect(() => {
+    if (!syncedRef.current) return;
+    localVersionRef.current++;
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = setTimeout(flushChanges, 400);
+  }, [
+    systemConfig,
+    users,
+    grades,
+    students,
+    attendance,
+    timetable,
+    messages,
+    announcements,
+    homework,
+    behaviorPoints,
+    lessonPlusMinus,
+    passwordResetRequests,
+    flushChanges,
+  ]);
+
+  const refreshFromServer = useCallback(async () => {
+    if (!tokenRef.current || flushTimerRef.current || flushingRef.current) return;
+    const versionAtStart = localVersionRef.current;
+    try {
+      const data = await api('state', { token: tokenRef.current });
+      // Don't overwrite changes the user made while the request was in flight
+      if (versionAtStart !== localVersionRef.current || flushTimerRef.current || flushingRef.current) return;
+      applyServerState(data.state);
+    } catch (err: any) {
+      if (err.status === 401) {
+        setSession(null);
+        clearLocalState();
+      }
+    }
+  }, []);
+
+  // Initial load: school configuration + restore the session of this device
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const publicConfig = await api('public');
+        if (cancelled) return;
+        setSystemConfig({ ...DEFAULT_SYSTEM_CONFIG, ...publicConfig });
+        if (publicConfig.isInitialized && tokenRef.current) {
+          try {
+            const data = await api('state', { token: tokenRef.current });
+            if (!cancelled) applyServerState(data.state, data.userId);
+          } catch {
+            setSession(null);
+          }
+        }
+      } catch {
+        if (!cancelled) setSyncError('Brak połączenia z serwerem dziennika. Odśwież stronę.');
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Pick up changes made by other users / devices
+  useEffect(() => {
+    if (!currentUser) return;
+    const interval = setInterval(refreshFromServer, 20000);
+    const onFocus = () => refreshFromServer();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [currentUser?.id, refreshFromServer]);
+
+  // Only the administrator can wipe the shared journal and return everyone to the setup wizard
+  const resetSystemToInitialWizard = async () => {
+    try {
+      await api('reset', { method: 'POST', token: tokenRef.current });
+    } catch (err: any) {
+      setSyncError(err.message || 'Nie udało się zresetować dziennika.');
+      return;
+    }
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = null;
+    setSession(null);
+    clearLocalState();
+  };
+
+  const initializeSystem = async (config: {
     schoolName: string;
     schoolCity: string;
     academicYear: string;
@@ -287,8 +468,6 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
       adminName: config.adminName.trim() || 'Administrator',
       adminEmail: config.adminEmail.trim() || 'admin@szkola.edu.pl',
     };
-    setSystemConfig(newConfig);
-
     const adminUser: User = {
       id: 'user_admin_' + Date.now(),
       name: config.adminName.trim() || 'Główny Administrator',
@@ -300,26 +479,20 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
       avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=256&q=80',
     };
 
-    if (config.includeDemoData) {
-      setUsers([adminUser, ...INITIAL_USERS.filter(u => u.role !== 'admin')]);
-      setStudents(INITIAL_STUDENTS);
-      setGrades(INITIAL_GRADES);
-      setAttendance(INITIAL_ATTENDANCE);
-      setTimetable(INITIAL_TIMETABLE);
-      setBehaviorPoints(INITIAL_BEHAVIOR_POINTS);
-      setLessonPlusMinus(INITIAL_PLUS_MINUS);
-    } else {
-      // Pure clean mode: only the Administrator user created by the user!
-      setUsers([adminUser]);
-      setStudents([]);
-      setGrades([]);
-      setAttendance([]);
-      setTimetable([]);
-      setBehaviorPoints([]);
-      setLessonPlusMinus([]);
-      setHomework([]);
-      setPasswordResetRequests([]);
-    }
+    const demo = !!config.includeDemoData;
+    // Pure clean mode: only the Administrator user created by the user!
+    const initialState: Omit<SyncedState, 'messages' | 'announcements'> = {
+      systemConfig: newConfig,
+      users: demo ? [adminUser, ...INITIAL_USERS.filter(u => u.role !== 'admin')] : [adminUser],
+      students: demo ? INITIAL_STUDENTS : [],
+      grades: demo ? INITIAL_GRADES : [],
+      attendance: demo ? INITIAL_ATTENDANCE : [],
+      timetable: demo ? INITIAL_TIMETABLE : [],
+      behaviorPoints: demo ? INITIAL_BEHAVIOR_POINTS : [],
+      lessonPlusMinus: demo ? INITIAL_PLUS_MINUS : [],
+      homework: [],
+      passwordResetRequests: [],
+    };
 
     // Welcome message for the Administrator
     const welcomeMsg: Message = {
@@ -335,7 +508,6 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
       isRead: false,
       isStarred: true,
     };
-    setMessages([welcomeMsg]);
 
     const welcomeAnn: Announcement = {
       id: 'ann_welcome_' + Date.now(),
@@ -348,9 +520,22 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
       priority: 'important',
       pinned: true,
     };
-    setAnnouncements([welcomeAnn]);
 
-    setCurrentUser(adminUser);
+    try {
+      const data = await api('setup', {
+        body: { state: { ...initialState, messages: [welcomeMsg], announcements: [welcomeAnn] } },
+      });
+      setSession(data.token);
+      applyServerState(data.state, data.userId);
+      return { success: true };
+    } catch (err: any) {
+      if (err.status === 409) {
+        // Already configured (e.g. from another device) – go to the login screen instead
+        const publicConfig = await api('public').catch(() => null);
+        if (publicConfig) setSystemConfig({ ...DEFAULT_SYSTEM_CONFIG, ...publicConfig });
+      }
+      return { success: false, message: err.message };
+    }
   };
 
   const updateSystemConfig = (updated: Partial<SystemConfig>) => {
@@ -429,65 +614,46 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setUsers(prev => prev.filter(u => u.id !== id));
   };
 
-  const resetSystem = () => {
-    localStorage.clear();
-    setSystemConfig({ ...DEFAULT_SYSTEM_CONFIG, isInitialized: false });
-    setUsers(INITIAL_USERS);
-    setGrades(INITIAL_GRADES);
-    setStudents(INITIAL_STUDENTS);
-    setAttendance(INITIAL_ATTENDANCE);
-    setTimetable(INITIAL_TIMETABLE);
-    setMessages(INITIAL_MESSAGES);
-    setAnnouncements(INITIAL_ANNOUNCEMENTS);
-    setHomework(INITIAL_HOMEWORK);
-    setCurrentUser(null);
-  };
+  const resetSystem = () => resetSystemToInitialWizard();
 
+  // Administrator preview of another user's view (the server session stays the administrator's)
   const loginAs = (userId: string) => {
+    const sessionUser = users.find(u => u.id === sessionUserIdRef.current);
+    if (sessionUser?.role !== 'admin') return;
     const user = users.find(u => u.id === userId);
     if (user) {
       setCurrentUser(user);
     }
   };
 
-  const loginWithCredentials = (email: string, password?: string): boolean => {
-    const cleaned = email.trim().toLowerCase();
-    const match = users.find(
-      u => u.email.toLowerCase() === cleaned || u.name.toLowerCase() === cleaned
-    );
-
-    if (match) {
-      if (password && match.password && match.password !== password) {
-        return false;
+  const loginWithCredentials = async (email: string, password?: string): Promise<boolean> => {
+    if (!email.trim() || !password) return false;
+    try {
+      const data = await api('login', { body: { login: email.trim(), password } });
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        await flushChanges();
       }
-      setCurrentUser(match);
+      setSession(data.token);
+      applyServerState(data.state, data.userId);
       return true;
+    } catch {
+      return false;
     }
-
-    // Support shortcut usernames like 'admin', 'nauczyciel', 'uczen', 'rodzic'
-    const shortcutMap: Record<string, string> = {
-      admin: 'user_admin',
-      administrator: 'user_admin',
-      nauczyciel: 'user_teacher',
-      teacher: 'user_teacher',
-      uczen: 'user_student',
-      student: 'user_student',
-      rodzic: 'user_parent',
-      parent: 'user_parent',
-    };
-    const targetId = shortcutMap[cleaned];
-    if (targetId) {
-      const shortcutUser = users.find(u => u.id === targetId);
-      if (shortcutUser) {
-        setCurrentUser(shortcutUser);
-        return true;
-      }
-    }
-    return false;
   };
 
   const logout = () => {
-    setCurrentUser(null);
+    const token = tokenRef.current;
+    const pendingFlush = flushTimerRef.current;
+    if (pendingFlush) clearTimeout(pendingFlush);
+    // Save any pending changes before the session is closed on the server
+    (pendingFlush ? flushChanges() : Promise.resolve()).finally(() => {
+      if (token) api('logout', { method: 'POST', token }).catch(() => {});
+    });
+    setSession(null);
+    const config = systemConfig;
+    clearLocalState();
+    setSystemConfig(config);
   };
 
   // Grade actions
@@ -816,52 +982,34 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setStudents(prev => prev.filter(s => s.id !== id));
   };
 
-  const submitPasswordResetRequest = (data: {
+  const submitPasswordResetRequest = async (data: {
     fullName: string;
     emailOrLogin: string;
     roleCandidate?: 'uczen' | 'nauczyciel' | 'rodzic';
     className?: string;
     reasonNote?: string;
   }) => {
-    const reqId = 'RST-' + Math.floor(1000 + Math.random() * 9000);
-    const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 16);
-    const newReq: PasswordResetRequest = {
-      id: reqId,
-      fullName: data.fullName.trim(),
-      emailOrLogin: data.emailOrLogin.trim().toLowerCase(),
-      roleCandidate: data.roleCandidate || 'uczen',
-      className: data.className?.trim(),
-      requestDate: nowStr,
-      status: 'oczekujące',
-      reasonNote: data.reasonNote?.trim() || 'Prośba o nadanie / zresetowanie hasła dostępowego.',
-    };
-
-    setPasswordResetRequests(prev => [newReq, ...prev]);
-
-    // Send alert message to admin
-    const admin = users.find(u => u.role === 'admin') || currentUser;
-    if (admin) {
-      const alertMsg: Message = {
-        id: 'msg_req_' + Date.now(),
-        senderId: 'system_reset',
-        senderName: 'System Resetu Haseł',
-        senderRole: 'Formularz Zgłoszeniowy',
-        recipientId: admin.id,
-        recipientName: admin.name,
-        subject: `[Prośba o hasło #${reqId}] ${data.fullName} (${data.emailOrLogin})`,
-        content: `Użytkownik złożył wniosek o reset / wydanie hasła:\n\n- Imię i nazwisko: ${data.fullName}\n- E-mail / Login: ${data.emailOrLogin}\n- Rola: ${data.roleCandidate || 'uczeń'}${data.className ? ` (Oddział: ${data.className})` : ''}\n- Powód: ${data.reasonNote || 'Brak uzasadnienia'}\n- Kod zgłoszenia: #${reqId}\n\nPrzejdź do Panelu Administratora (zakładka "Zgłoszenia o reset hasła"), aby wygenerować nowe hasło i odesłać odpowiedź.`,
-        date: nowStr,
-        isRead: false,
-        isStarred: true,
+    try {
+      const res = await api<{ requestId: string }>('reset-requests', { body: { request: data } });
+      return {
+        success: true,
+        message: `Zgłoszenie #${res.requestId} zostało pomyślnie wysłane do Administratora Szkoły. Możesz sprawdzić status i odebrać nowe hasło w zakładce "Sprawdź status zgłoszenia".`,
+        requestId: res.requestId,
       };
-      setMessages(prev => [alertMsg, ...prev]);
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Nie udało się wysłać zgłoszenia.', requestId: '' };
     }
+  };
 
-    return {
-      success: true,
-      message: `Zgłoszenie #${reqId} zostało pomyślnie wysłane do Administratora Szkoły. Możesz sprawdzić status i odebrać nowe hasło w zakładce "Sprawdź status zgłoszenia".`,
-      requestId: reqId,
-    };
+  const checkPasswordResetRequestStatus = async (query: string): Promise<PasswordResetRequest | null> => {
+    try {
+      const res = await api<{ request: PasswordResetRequest | null }>(
+        'reset-requests?q=' + encodeURIComponent(query.trim())
+      );
+      return res.request;
+    } catch {
+      return null;
+    }
   };
 
   const resolvePasswordResetRequest = (
@@ -898,13 +1046,13 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   };
 
-  const resetToDefaults = () => {
-    resetSystemToInitialWizard();
-  };
+  const resetToDefaults = () => resetSystemToInitialWizard();
 
   return (
     <JournalContext.Provider
       value={{
+        isLoading,
+        syncError,
         currentUser,
         users,
         systemConfig,
@@ -960,6 +1108,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({ child
         deleteStudent,
         passwordResetRequests,
         submitPasswordResetRequest,
+        checkPasswordResetRequestStatus,
         resolvePasswordResetRequest,
         resetToDefaults,
       }}
