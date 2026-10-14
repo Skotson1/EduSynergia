@@ -30,7 +30,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
   if (!isOpen) return null;
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
 
@@ -39,7 +39,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
       return;
     }
 
-    const ok = loginWithCredentials(emailInput.trim(), passwordInput);
+    const ok = await loginWithCredentials(emailInput.trim(), passwordInput);
     if (ok) {
       setLoginSuccess(true);
       setTimeout(() => {

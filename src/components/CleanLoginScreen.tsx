@@ -31,9 +31,8 @@ export const CleanLoginScreen: React.FC<CleanLoginScreenProps> = ({ onSuccess })
   const {
     loginWithCredentials,
     systemConfig,
-    users,
-    passwordResetRequests,
     submitPasswordResetRequest,
+    checkPasswordResetRequestStatus,
   } = useJournal();
 
   // Login form state
@@ -62,7 +61,9 @@ export const CleanLoginScreen: React.FC<CleanLoginScreenProps> = ({ onSuccess })
   const [searchedRequest, setSearchedRequest] = useState<any | null>(null);
   const [statusError, setStatusError] = useState('');
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
 
@@ -75,7 +76,9 @@ export const CleanLoginScreen: React.FC<CleanLoginScreenProps> = ({ onSuccess })
       return;
     }
 
-    const success = loginWithCredentials(loginEmail.trim(), loginPassword);
+    setIsLoggingIn(true);
+    const success = await loginWithCredentials(loginEmail.trim(), loginPassword);
+    setIsLoggingIn(false);
     if (success) {
       setLoginSuccess(true);
       setTimeout(() => {
@@ -93,11 +96,11 @@ export const CleanLoginScreen: React.FC<CleanLoginScreenProps> = ({ onSuccess })
     setLoginError('');
   };
 
-  const handleResetSubmit = (e: React.FormEvent) => {
+  const handleResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!reqFullName.trim() || !reqEmail.trim()) return;
 
-    const res = submitPasswordResetRequest({
+    const res = await submitPasswordResetRequest({
       fullName: reqFullName,
       emailOrLogin: reqEmail,
       roleCandidate: reqRole,
@@ -105,13 +108,17 @@ export const CleanLoginScreen: React.FC<CleanLoginScreenProps> = ({ onSuccess })
       reasonNote: reqReason,
     });
 
+    if (!res.success) {
+      setSubmitResult({ message: res.message, id: '' });
+      return;
+    }
     setSubmitResult({ message: res.message, id: res.requestId });
     setStatusSearchQuery(reqEmail.trim());
     setReqFullName('');
     setReqReason('');
   };
 
-  const handleCheckStatus = (e: React.FormEvent) => {
+  const handleCheckStatus = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatusError('');
     setSearchedRequest(null);
@@ -122,12 +129,7 @@ export const CleanLoginScreen: React.FC<CleanLoginScreenProps> = ({ onSuccess })
       return;
     }
 
-    const match = passwordResetRequests.find(
-      r =>
-        r.emailOrLogin.toLowerCase() === query ||
-        r.id.toLowerCase() === query ||
-        r.id.toLowerCase() === ('#' + query)
-    );
+    const match = await checkPasswordResetRequestStatus(query);
 
     if (match) {
       setSearchedRequest(match);
@@ -302,27 +304,10 @@ export const CleanLoginScreen: React.FC<CleanLoginScreenProps> = ({ onSuccess })
 
             {showHelperInfo && (
               <div className="mt-2.5 p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 space-y-2">
-                {users.length > 0 ? (
-                  users.slice(0, 4).map(u => (
-                    <div key={u.id} className="flex items-center justify-between py-1 border-b border-slate-200/50 last:border-none">
-                      <div>
-                        <strong className="text-slate-800">{u.roleTitle || u.role}:</strong>{' '}
-                        <code className="bg-slate-200 px-1 rounded text-[10px]">{u.email}</code>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleFillLogin(u.email)}
-                        className="px-2 py-0.5 bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 rounded font-bold text-[10px] cursor-pointer"
-                      >
-                        Wstaw
-                      </button>
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-slate-500 italic">
-                    Brak kont demonstracyjnych. Dziennik czeka na rejestrację pierwszego Administratora.
-                  </div>
-                )}
+                <div className="text-slate-500">
+                  Konta (login i hasło) wydaje wyłącznie Administrator szkoły. Możesz zalogować się na dowolnym urządzeniu —
+                  dane dziennika są wspólne. Jeśli nie pamiętasz hasła, wyślij prośbę o reset.
+                </div>
               </div>
             )}
           </div>

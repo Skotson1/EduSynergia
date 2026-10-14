@@ -51,7 +51,7 @@ export const InitialSetupWizard: React.FC = () => {
     { name: 'XIV Liceum Ogólnokształcące', city: 'Wrocław' },
   ];
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
 
@@ -74,18 +74,20 @@ export const InitialSetupWizard: React.FC = () => {
 
     setIsSubmitting(true);
 
-    setTimeout(() => {
-      initializeSystem({
-        schoolName: schoolName.trim(),
-        schoolCity: schoolCity.trim() || 'Warszawa',
-        academicYear: academicYear.trim() || '2025/2026',
-        semester,
-        adminName: adminName.trim(),
-        adminEmail: adminEmail.trim(),
-        adminPassword,
+    const result = await initializeSystem({
+      schoolName: schoolName.trim(),
+      schoolCity: schoolCity.trim() || 'Warszawa',
+      academicYear: academicYear.trim() || '2025/2026',
+      semester,
+      adminName: adminName.trim(),
+      adminEmail: adminEmail.trim(),
+      adminPassword,
         includeDemoData: includeDemoClasses,
-      });
-    }, 450);
+    });
+    if (!result.success) {
+      setIsSubmitting(false);
+      setErrorMessage(result.message || 'Nie udało się zapisać konfiguracji. Spróbuj ponownie.');
+    }
   };
 
   return (
