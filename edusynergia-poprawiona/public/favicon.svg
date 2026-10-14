@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <rect width="48" height="48" rx="10" fill="#1e3a8a"/>
+  <!-- Graduation cap & open book -->
+  <path d="M24 10L39 18L24 26L9 18L24 10Z" fill="#38bdf8"/>
+  <path d="M36 21V28C36 31 30.6 34 24 34C17.4 34 12 31 12 28V21L24 27L36 21Z" fill="#ffffff" fill-opacity="0.9"/>
+  <circle cx="39" cy="22" r="2" fill="#fbbf24"/>
+  <path d="M39 23V31" stroke="#fbbf24" stroke-width="2" stroke-linecap="round"/>
+</svg>

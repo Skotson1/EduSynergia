@@ -1,0 +1,7 @@
+{
+  "name": "Dziennik Szkolny EduSynergia",
+  "description": "Nowoczesny dziennik elektroniczny z ocenami, frekwencją, planem lekcji, wiadomościami i panelem administratora.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

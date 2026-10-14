@@ -1,0 +1,23 @@
+=====================================================
+  DZIENNIK SZKOLNY EDUSYNERGIA - PACZKA PROJEKTOWA
+=====================================================
+
+Dziękujemy za pobranie! W tym archiwum znajduje się kompletny projekt:
+
+1. FOLDER /src/
+   - Pełny kod źródłowy React 19 + TypeScript + Tailwind CSS
+   - Gotowy panel dyrekcji, oceny, frekwencja, zachowanie, plan lekcji, wiadomości
+
+2. FOLDER /dist/
+   - Gotowa, zminifikowana wersja produkcyjna!
+   - Możesz ten folder od razu wrzucić na dowolny darmowy hosting (np. Netlify przeciągnij i upuść na netlify.com)
+     i strona od razu działa w internecie!
+
+3. JAK URUCHOMIĆ W TRYBIE DEWELOPERSKIM (jeśli masz zainstalowany Node.js):
+   krok 1: Otwórz terminal w tym folderze
+   krok 2: Wpisz: npm install
+   krok 3: Wpisz: npm run dev
+   krok 4: Otwórz w przeglądarce: http://localhost:3000
+
+4. Szczegółową instrukcję wrzucenia do sieci znajdziesz w pliku DEPLOYMENT.md!
+=====================================================
